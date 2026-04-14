@@ -364,6 +364,19 @@ async function main(): Promise<void> {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
 		});
 
+		// Fix Accept headers for MCP compatibility
+		// Claude's connector may not send the exact headers the SDK expects
+		app.use('/mcp', (req: Request, _res: Response, next) => {
+			const accept = req.headers['accept'] || '';
+			const parts: string[] = [];
+			if (!accept.includes('application/json')) parts.push('application/json');
+			if (!accept.includes('text/event-stream')) parts.push('text/event-stream');
+			if (parts.length > 0) {
+				req.headers['accept'] = accept ? `${accept}, ${parts.join(', ')}` : parts.join(', ');
+			}
+			next();
+		});
+
 		app.all('/mcp', async (req: Request, res: Response) => {
 			const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
@@ -385,6 +398,7 @@ async function main(): Promise<void> {
 				} else {
 					transport = new StreamableHTTPServerTransport({
 						sessionIdGenerator: () => crypto.randomUUID(),
+						enableJsonResponse: true,
 						onsessioninitialized: newSessionId => {
 							transports.set(newSessionId, { transport, lastAccess: Date.now() });
 						},
@@ -394,7 +408,18 @@ async function main(): Promise<void> {
 					await server.connect(transport);
 				}
 
-				await transport.handleRequest(req, res);
+				await transport.handleRequest(req, res, req.body);
+				return;
+			}
+
+			if (req.method === 'GET') {
+				if (sessionId && transports.has(sessionId)) {
+					const session = transports.get(sessionId)!;
+					session.lastAccess = Date.now();
+					await session.transport.handleRequest(req, res);
+					return;
+				}
+				res.status(405).send('Method not allowed');
 				return;
 			}
 
